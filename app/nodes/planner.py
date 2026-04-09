@@ -243,3 +243,28 @@ async def planner_node(state: GraphState) -> GraphState:
             ),
         )
         return state
+
+    except Exception as exc:
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        fallback = _build_fallback_plan(state)
+        state.agent_state = fallback
+        state.workflow_outcome = "needs_human_review"
+        state.additional_metadata["planner_error"] = {
+            "request_id": request_id,
+            "error_type": exc.__class__.__name__,
+            "message": str(exc),
+            "latency_ms": latency_ms,
+            "fallback_plan_used": True,
+        }
+
+        logger.exception(
+            "planner.unexpected_error",
+            extra=bind_log_context(
+                request_id=request_id,
+                node_name="planner",
+                error_type=exc.__class__.__name__,
+                latency_ms=latency_ms,
+            ),
+        )
+        return state
+

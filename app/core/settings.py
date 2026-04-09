@@ -24,8 +24,11 @@ class Settings(BaseSettings):
     app_name: str = Field(default="support-copilot", alias="APP_NAME")
     app_version: str = Field(default="0.0.0", alias="APP_VERSION")
     openai_api_key: str = Field(..., alias="OPENAI_API_KEY")
+    
     openai_model_input_shield: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL_INPUT_SHIELD")
     openai_model_planner: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL_PLANNER")
+    openai_model_response_drafting: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL_RESPONSE_DRAFTING",)
+    
     openai_timeout_seconds: float = Field(default=20.0, alias="OPENAI_TIMEOUT_SECONDS")
     openai_max_retries: int = Field(default=2, alias="OPENAI_MAX_RETRIES")
 
