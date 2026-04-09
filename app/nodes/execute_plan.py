@@ -15,9 +15,12 @@ from app.services.retrieval_service import retrieve_relevant_documents
 logger = get_logger(__name__)
 
 
-# Helper: return a new step marked as completed.
-# We keep step updates immutable-like by creating a fresh PlanStep
-# instead of mutating the existing object in place.
+# This helper creates a fresh copy of a step and marks it as completed.
+#
+# We do this instead of mutating the original step directly because:
+# - it keeps updates explicit
+# - it makes debugging easier
+# - it fits well with state-based workflow thinking
 def _mark_step_completed(step: PlanStep, result: str | None = None) -> PlanStep:
     return PlanStep(
         step_id=step.step_id,
@@ -31,9 +34,13 @@ def _mark_step_completed(step: PlanStep, result: str | None = None) -> PlanStep:
     )
 
 
-# Helper: return a new step marked as failed.
-# The error message is stored on the step so the graph can later inspect
-# exactly which execution step failed and why.
+# This helper marks a step as failed and stores the error message on the step itself.
+#
+# Why store the error on the step?
+# Because later, when we inspect the graph state, we want to know:
+# - which step failed
+# - why it failed
+# - whether we should route to human review
 def _mark_step_failed(step: PlanStep, error: str) -> PlanStep:
     return PlanStep(
         step_id=step.step_id,
@@ -47,10 +54,11 @@ def _mark_step_failed(step: PlanStep, error: str) -> PlanStep:
     )
 
 
-# Helper: keep a step pending.
-# This is especially useful for "human" steps, because execute_plan_node
-# should not execute human review itself — it only leaves that step ready
-# for the downstream human_review node.
+# This helper keeps a step in pending state.
+#
+# In our workflow, this is mainly used for human-owned steps.
+# execute_plan_node does not perform human review itself.
+# It only prepares the workflow so that the later human_review node can handle it.
 def _mark_step_pending(step: PlanStep) -> PlanStep:
     return PlanStep(
         step_id=step.step_id,
@@ -64,14 +72,24 @@ def _mark_step_pending(step: PlanStep) -> PlanStep:
     )
 
 
-# Build a simple retrieval query from:
-# - the original customer message
-# - the planner's step title/description
-# - key triage signals
+# The planner decides THAT retrieval is needed.
+# The executor decides HOW to turn that decision into a query.
 #
-# This is the bridge between planning and retrieval:
-# the planner decides that retrieval is needed,
-# and the executor turns that decision into an actual retrieval query.
+# For tutorial v1, we build a simple query using:
+# - the customer message
+# - the planner step title
+# - the planner step description
+# - a few useful triage fields
+#
+# This is intentionally simple and explainable.
+
+# ticket = "I was charged twice and want a refund"
+# step.title = "Retrieve refund policy"
+# step.description = "Retrieve refund and billing policy relevant to the ticket"
+# triage.issue_category = "refund"
+# triage.intent = "complaint"
+# Result: I was charged twice and want a refund Retrieve refund policy 
+# Retrieve refund and billing policy relevant to the ticket refund complaint ...
 def _build_retrieval_query(state: GraphState, step: PlanStep) -> str:
     triage = state.triage_result
     ticket = state.initial_ticket.customer_message
@@ -90,9 +108,14 @@ def _build_retrieval_query(state: GraphState, step: PlanStep) -> str:
     return " ".join(part for part in parts if part)
 
 
-# After executing the plan, determine which step should be considered
-# the next actionable step in the workflow.
-# Usually this will be the human review step if one remains pending.
+# After execution, we want to know what the next actionable step is.
+#
+# Example:
+# - retrieval step completed
+# - drafting step completed
+# - human review step still pending
+#
+# In that case, the next pending step should be the human review step.
 def _get_next_pending_step_id(plan: list[PlanStep]) -> str | None:
     for step in plan:
         if step.status == "pending":
@@ -100,23 +123,24 @@ def _get_next_pending_step_id(plan: list[PlanStep]) -> str | None:
     return None
 
 
-# Execute one retrieval step.
+# Execute a retrieval step.
 #
-# v1 approach:
-# - build a simple keyword-style query
-# - retrieve local KB documents
-# - store them in state.retrieved_documents
-# - mark the step as completed
+# What happens here:
+# 1. Build a retrieval query from current workflow context
+# 2. Fetch relevant KB documents
+# 3. Save them into state.retrieved_documents
+# 4. Mark the step as completed
 #
-# The planner does not retrieve documents itself.
-# It only expresses that retrieval is needed.
-# This function is where that plan becomes action.
+# Important:
+# The planner does NOT retrieve docs itself.
+# It only says retrieval should happen.
+# This function is where that plan becomes real execution.
 async def _execute_retrieval_step(state: GraphState, step: PlanStep) -> tuple[PlanStep, int]:
     query = _build_retrieval_query(state, step)
     documents = retrieve_relevant_documents(query=query, max_documents=3)
 
-    # Persist retrieved evidence into graph state for downstream nodes:
-    # response drafting and guardrails.
+    # Save retrieved documents in graph state so downstream steps can use them.
+    # The response drafting step depends on this context.
     state.retrieved_documents = documents
 
     result_summary = f"Retrieved {len(documents)} document(s)."
@@ -125,17 +149,20 @@ async def _execute_retrieval_step(state: GraphState, step: PlanStep) -> tuple[Pl
     return updated_step, len(documents)
 
 
-# Execute one response drafting step.
+# Execute a response drafting step.
 #
-# Requirements:
-# - triage_result must already exist
-# - retrieval may or may not have produced documents
+# What happens here:
+# 1. Read triage + retrieved documents from state
+# 2. Build a drafting prompt
+# 3. Ask the LLM for a structured ResponseDrafting object
+# 4. Save it into state.response_draft
+# 5. Mark the step as completed
 #
-# This function uses the retrieved context plus triage information
-# to ask the LLM for a structured ResponseDrafting output.
+# This is the point where the workflow creates the customer-facing draft.
+# The guardrails node will validate this artifact next.
 async def _execute_response_step(state: GraphState, step: PlanStep) -> PlanStep:
-    # Drafting without triage would mean missing important business signals
-    # such as urgency, tone, escalation need, and risk level.
+    # We require triage before drafting because the draft should reflect
+    # issue type, urgency, tone, and human-review sensitivity.
     if state.triage_result is None:
         return _mark_step_failed(step, "Missing triage_result for response drafting.")
 
@@ -168,11 +195,11 @@ async def _execute_response_step(state: GraphState, step: PlanStep) -> PlanStep:
     if parsed is None or not isinstance(parsed, ResponseDrafting):
         return _mark_step_failed(step, "Response drafting returned invalid structured output.")
 
-    # Persist the drafted response into state.
-    # This is the main artifact that the guardrails node will validate next.
+    # Save the draft into state.
+    # This becomes the main input for the guardrails node.
     state.response_draft = parsed
 
-    # Store execution metadata for observability/debugging.
+    # Save useful execution metadata for tracing/debugging.
     state.additional_metadata["response_drafting"] = {
         "request_id": state.request_id,
         "model_name": result.model_name,
@@ -186,17 +213,19 @@ async def _execute_response_step(state: GraphState, step: PlanStep) -> PlanStep:
 
 # Main executor node.
 #
-# Responsibilities:
-# - read the planner-produced plan
-# - execute supported step types (retrieval / response drafting)
-# - leave human steps pending
-# - update step statuses
-# - write execution artifacts into state
-# - record observability metadata
+# This node is the "Act" part of the pattern:
+# Plan -> Act -> Validate
 #
-# In other words:
-# planner -> decides WHAT should happen
-# execute_plan -> actually DOES it
+# Upstream:
+# - planner created the plan
+#
+# This node:
+# - reads the plan
+# - executes supported steps
+# - updates state artifacts
+#
+# Downstream:
+# - guardrails validates the drafted response
 @traceable(run_type="chain", name="execute_plan_node")
 async def execute_plan_node(state: GraphState) -> GraphState:
     started = time.perf_counter()
@@ -210,8 +239,8 @@ async def execute_plan_node(state: GraphState) -> GraphState:
         ),
     )
 
-    # Fail fast if the planner did not produce a usable plan.
-    # This protects the workflow from executing on incomplete state.
+    # Safety check:
+    # if there is no plan, this node has nothing meaningful to execute.
     if state.agent_state is None or not state.agent_state.plan:
         state.workflow_outcome = "blocked"
         state.additional_metadata["execute_plan_error"] = {
@@ -224,21 +253,24 @@ async def execute_plan_node(state: GraphState) -> GraphState:
     updated_plan: list[PlanStep] = []
     retrieval_count = 0
 
-    # Walk through the plan in order and execute the steps the executor owns.
+    # Walk through the plan in order.
+    # For v1, we support:
+    # - retrieval_agent steps
+    # - response_agent steps
+    # - human steps (kept pending)
     for step in state.agent_state.plan:
-        # Retrieval step: fetch local KB context and mark the step completed.
+        # Retrieval steps fetch supporting evidence from the knowledge base.
         if step.owner == "retrieval_agent" and step.status == "pending":
             try:
                 updated_step, docs_count = await _execute_retrieval_step(state, step)
                 retrieval_count += docs_count
                 updated_plan.append(updated_step)
             except Exception as exc:
-                # Execution should be resilient:
-                # one failed step should not crash the whole workflow.
+                # Important production-minded behavior:
+                # one step failure should not crash the whole workflow.
                 updated_plan.append(_mark_step_failed(step, str(exc)))
 
-        # Response drafting step: generate a structured draft using
-        # triage signals and retrieved documents.
+        # Response steps create the customer-facing draft.
         elif step.owner == "response_agent" and step.status == "pending":
             try:
                 updated_step = await _execute_response_step(state, step)
@@ -246,30 +278,26 @@ async def execute_plan_node(state: GraphState) -> GraphState:
             except Exception as exc:
                 updated_plan.append(_mark_step_failed(step, str(exc)))
 
-        # Human step is not executed here.
-        # We simply leave it pending so that the dedicated human_review node
-        # can handle it later in the graph.
+        # Human steps are intentionally not executed here.
+        # They remain pending so that the human_review node can handle them later.
         elif step.owner == "human":
             updated_plan.append(_mark_step_pending(step))
 
-        # Any other step is passed through unchanged.
-        # This keeps v1 flexible without overengineering execution branching.
+        # Any unsupported or already-resolved steps are carried forward unchanged.
         else:
             updated_plan.append(step)
 
-    # Persist the updated plan back into state.
+    # Save the updated plan back into the graph state.
     state.agent_state.plan = updated_plan
     state.agent_state.current_step_id = _get_next_pending_step_id(updated_plan)
 
     failed_steps = [step for step in updated_plan if step.status == "failed"]
     human_steps = [step for step in updated_plan if step.owner == "human"]
 
-    # Outcome logic:
-    # - if execution failed anywhere, route toward human review
-    # - otherwise keep the workflow running
+    # Decide the current workflow outcome after execution.
     #
-    # Even if a human step exists, execute_plan itself does not finish the case;
-    # it only prepares the state for downstream nodes.
+    # If something failed, we prefer a safe path toward human review.
+    # Otherwise the workflow stays "running" so downstream nodes can continue.
     if failed_steps:
         state.workflow_outcome = "needs_human_review"
     elif human_steps:
@@ -279,7 +307,12 @@ async def execute_plan_node(state: GraphState) -> GraphState:
 
     latency_ms = round((time.perf_counter() - started) * 1000, 2)
 
-    # Store execution-level metadata for tracing, debugging, and later metrics.
+    # Store execution metadata for observability.
+    # This helps later with:
+    # - debugging
+    # - tracing
+    # - latency inspection
+    # - future metrics collection
     state.additional_metadata["execute_plan"] = {
         "request_id": request_id,
         "latency_ms": latency_ms,
