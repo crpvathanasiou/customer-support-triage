@@ -1,4 +1,4 @@
-input_shield_node
+# input_shield_node
   input:
     - initial_ticket
     - request_id
@@ -16,7 +16,7 @@ input_shield_node
         - "running" όταν το input μπορεί να συνεχίσει κανονικά
     - γράφει metadata για model / latency / guardrails / errors
 
-triage_node
+# triage_node
   input:
     - initial_ticket
     - shield_result
@@ -35,7 +35,7 @@ triage_node
     - γράφει metadata για model / latency / attempts / triage result
     - σε recoverable failure μπορεί να γράψει triage_error metadata
 
-planner_node
+# planner_node
   input:
     - initial_ticket
     - shield_result
@@ -59,7 +59,7 @@ planner_node
     - σε failure γράφει fallback plan αντί να σπάει όλο το workflow
     - γράφει metadata για model / latency / attempts / plan_length / current_step_id
 
-execute_plan_node
+# execute_plan_node
   input:
     - initial_ticket
     - triage_result
@@ -99,7 +99,7 @@ execute_plan_node
     - γράφει metadata για retrieved docs count / failed steps / next_step_id
     - γράφει response_drafting metadata όταν παραχθεί draft
 
-guardrails_node
+# guardrails_node
   input:
     - response_draft
     - triage_result
@@ -131,7 +131,7 @@ guardrails_node
         - workflow_outcome παραμένει "running" εκτός αν ήδη χρειάζεται human review από προηγούμενο στάδιο
     - γράφει metadata για issues_count / issues / is_safe
 
-human_review_node
+# human_review_node
   input:
     - shield_result
     - triage_result
@@ -161,7 +161,7 @@ human_review_node
         - review_status = "rejected"
     - γράφει human_comments στα metadata, δεν τα αλλάζει
 
-finalize_node
+# finalize_node
   input:
     - workflow_outcome
     - human_approved
@@ -188,3 +188,4 @@ finalize_node
         - is_safe
         - human_approved
         - current_step_id
+

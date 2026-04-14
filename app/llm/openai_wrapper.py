@@ -303,6 +303,13 @@ class AsyncOpenAIWrapper:
                 # Απλό linear backoff.
                 await asyncio.sleep(0.5 * attempt)
 
+            # Οτιδήποτε άλλο εδώ θεωρείται upstream/transport failure.
+            # Το κρατάμε ξεχωριστό από parsing/schema/logic failures.
+            except Exception as exc:
+                raise UpstreamServiceError(
+                    f"OpenAI text request failed with unexpected upstream error: {exc}"
+                ) from exc
+
         raise UpstreamServiceError(f"OpenAI text request failed: {last_error}")
 
     # -------------------------------------------------------------------------
